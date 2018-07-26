@@ -1,0 +1,346 @@
+"""Models for fashion Net."""
+import torch
+
+from torch import nn
+import config as cfg
+NUM_ENCODER = cfg.NumCate
+import torch.nn.functional as F
+
+class ItemFeature(nn.Module):
+    """AlexNet for feature extractor."""
+
+    def __init__(self):
+        """Feature Extractor.
+
+        Extract the feature for item.
+        """
+        super(ItemFeature, self).__init__()
+        #self.features = nn.Sequential(
+         #   nn.Linear(2400, 1800).double(),
+          #  nn.Linear(1800, 1024).double(),
+           # nn.ReLU()
+            #nn.Dropout()
+        #)
+
+    def forward(self, x):
+        """Forward."""
+        x = x.double()
+        return x
+
+
+class ItemEncoder(nn.Module):
+    """Module for latent code.
+
+    Encoder for item's features.
+    """
+
+    def __init__(self, dim):
+        """Initialize an encoder.
+
+        Parameter
+        ---------
+        dim: Dimension for latent space
+
+        """
+        super(ItemEncoder, self).__init__()
+        self.register_buffer('scale', torch.ones(1))
+        self.encoder = nn.Sequential(
+            nn.Linear(2400, dim).double(),
+            nn.ReLU()
+        )
+        self.active = nn.Tanh()
+
+    def set_scale(self, value):
+        """Set scale tanh."""
+        self.scale.fill_(value)
+
+    def forward(self, x):
+        """Forward a feature from ItemFeature."""
+        x = self.encoder(x.double())
+        h = torch.mul(x, torch.autograd.Variable(self.scale).double()).double()
+        return self.active(h)
+
+
+
+class ItemEncoder2C(nn.Module):
+    """Module for latent code with 2 channels."""
+
+    def __init__(self, dim):
+        """Initialize an encoder.
+
+        Parameters
+        ----------
+        dim: Dimension for latent space
+
+        """
+        super(ItemEncoder2C, self).__init__()
+        self.uencoder = ItemEncoder(dim)
+        self.iencoder = ItemEncoder(dim)
+
+    def forward(self, x):
+        """Forward a feature from ItemFeature."""
+        ucode = self.uencoder(x)
+        icode = self.iencoder(x)
+        return (ucode, icode)
+
+    def init_weights(self, state_dict):
+        """Initialize weights for two encoders."""
+        for model in self.children():
+            model.init_weights(state_dict)
+
+
+class UserEncoder(nn.Module):
+    """User embdding layer."""
+
+    def __init__(self, num_users, dim):
+        """User embdding.
+
+        Parameters:
+        ----------
+        num_users: number of users.
+        dim: Dimension for user latent code.
+        single: if use single layer to learn user's preference.
+        linear: if user Linear layer to learn user's preference.
+
+        """
+        super(UserEncoder, self).__init__()
+        self.register_buffer('scale', torch.ones(1))
+        self.embdding = nn.Linear(num_users, dim, bias=False).double()
+        self.active = nn.Tanh()
+
+    def set_scale(self, value):
+        """Set scale tanh."""
+        self.scale.fill_(value)
+
+    def init_weights(self, state_dict=None):
+        """Initialize weights for user encoder."""
+        for param in self.parameters():
+            param.data.normal_(0, 0.01)
+            # param.data.add_((param.data < -1).type_as(param.data) * 2)
+
+    def forward(self, input):
+        """Get user's latent codes given index."""
+        x = self.embdding(input.double())
+        h = torch.mul(x, torch.autograd.Variable(self.scale).double()).double()
+        return self.active(h)
+
+
+class PotMul(nn.Module):
+    """Pointwise multiplication."""
+
+    def __init__(self, dim, mu=1.0, std=0.01):
+        """Weights for this layer that is drawn from N(mu, std)."""
+        super(PotMul, self).__init__()
+        self.mu = mu
+        self.std = std
+        self.dim = dim
+        self.weight = nn.Parameter(torch.Tensor(1, dim))
+        self.init_weights()
+
+    def init_weights(self, state_dict=None):
+        """Initialize weights."""
+        self.weight.data.normal_(self.mu, self.std)
+
+    def forward(self, input):
+        """Forward."""
+        return torch.mul(input, self.weight)
+
+    def __repr__(self):
+        """Format string for module PotMul."""
+        return self.__class__.__name__ + '(dim=' + str(self.dim) + ')'
+
+
+class FashionBase(nn.Module):
+    """Base class for fashion net.
+
+    Methods:
+    --------
+    accuracy(): return the current accuracy (call after forward()).
+    binary(): return the accuracy with binary latent codes.
+    loss(): return loss.
+
+    """
+
+    def __init__(self, num_users, dim, single=False):
+        """Contols a base instances for FashionNet.
+
+        Parameters:
+        num_users: number of users.
+        dim: Dimension for user latent code.
+
+        """
+        super(FashionBase, self).__init__()
+        self.user_embdding = UserEncoder(num_users, dim)
+        self.features = ItemFeature()
+        self.single = single
+        if single:
+            self.encoder = ItemEncoder(dim)
+        else:
+            self.encoder = nn.ModuleList(
+                [ItemEncoder(dim) for n in range(NUM_ENCODER)])
+        self.dim = dim
+        self.ratio = 10.0 / self.dim
+        self.zero_uscores = False
+        self.zero_iscores = False
+
+    def set_scale(self, value):
+        """Set scale tahn."""
+        self.user_embdding.set_scale(value)
+        if self.single:
+            self.encoder.set_scale(value)
+        else:
+            for encoder in self.encoder:
+                encoder.set_scale(value)
+
+    def num_gropus(self):
+        """Size of sub-modules."""
+        return len(self._modules)
+
+    def name(self):
+        """Name of network."""
+        return self.__class__.__name__
+
+    def set_zero_uscores(self, flag=True):
+        """Set uscores to zero."""
+        self.zero_uscores = flag
+
+    def set_zero_iscores(self, flag=True):
+        """Set iscores to zero."""
+        self.zero_iscores = flag
+
+    def active_all_param(self):
+        """Active all parameters."""
+        for param in self.parameters():
+            param.requires_grad = True
+
+    def freeze_all_param(self):
+        """Active all parameters."""
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def freeze_user_param(self):
+        """Freeze user's latent codes."""
+        self.active_all_param()
+        for param in self.user_embdding.parameters():
+            param.requires_grad = False
+
+    def freeze_item_param(self):
+        """Freeze item's latent codes."""
+        self.freeze_all_param()
+        for param in self.user_embdding.parameters():
+            param.requires_grad = True
+
+    def ilatent_codes(self, items):
+        """Compute lantent codes for items."""
+        ilatent_codes = []
+        if self.single:
+            for x in items:
+                x = self.features(x)
+                h = self.encoder(x)
+                ilatent_codes.append(h.view(-1, self.dim))
+            return ilatent_codes
+        # top items
+        for x in items[0:-2]:
+            x = self.features(x)
+            h = self.encoder[0](x)
+            ilatent_codes.append(h.view(-1, self.dim))
+        # others
+        for n, x in enumerate(items[-2:]):
+            x = self.features(x)
+            h = self.encoder[n + 1](x)
+            ilatent_codes.append(h.view(-1, self.dim))
+        return ilatent_codes
+
+    def init_weights(self, state_dict):
+        """Initialize net weights with pretrained model.
+
+        Each sub-module should has its own same methods.
+        """
+        for model in self.children():
+            if isinstance(model, nn.ModuleList):
+                for m in model:
+                    m.init_weights(state_dict)
+            else:
+                model.init_weights(state_dict)
+
+    def uscores(self, ulatent, ilatents):
+        """Compute u-term in scores.
+
+        If zero_uscores is True, return 0
+
+        Parameters
+        ----------
+        ulatent: user latent code
+        ilatents: item latent codes
+
+        """
+        scores = torch.zeros_like(ilatents[0])
+        if self.zero_uscores:
+            return scores.sum(dim=1)
+        count = 0
+        for latent in ilatents:
+            scores += ulatent * latent
+            count += 1
+        return scores.sum(dim=1) / count
+
+    def iscores(self, ilatents):
+        """Compute i-term in scores.
+
+        If zero_iscores is True, return 0
+
+        Parameters
+        ----------
+        ilatents: item latent codes
+
+        """
+        scores = torch.zeros_like(ilatents[0])
+        if self.zero_iscores:
+            return scores.sum(dim=1)
+        count = 0
+        size = len(ilatents)
+        #print(ilatents)
+        #print(size)
+        for n in range(size):
+            for m in range(n + 1, size):
+                scores += ilatents[n] * ilatents[m]
+                count += 1
+        return scores.sum(dim=1) / count
+
+    def forward(self, posi, nega, uidx):
+        """Forward.
+
+        Return the comparative value between positive and negative tuples.
+        """
+        # compute latent codes
+        user_codes = self.user_embdding(uidx)
+        #user_codes_binary = user_codes.detach().sign()
+        item_codes_posi = self.ilatent_codes(posi)
+        item_codes_nega = self.ilatent_codes(nega)
+        #item_codes_nega_binary = [h.detach().sign() for h in item_codes_nega]
+        #item_codes_posi_binary = [h.detach().sign() for h in item_codes_posi]
+        uscore_posi = self.uscores(user_codes, item_codes_posi)
+        iscore_posi = self.iscores(item_codes_posi)
+        uscore_nega = self.uscores(user_codes, item_codes_nega)
+        iscore_nega = self.iscores(item_codes_nega)
+        #print("item_codes_posi:{}\nitem_codes_nega:{}".format(item_codes_posi, item_codes_nega))
+        #uscore_posi_binary = self.uscores(user_codes_binary,
+        #                                  item_codes_posi_binary)
+        #iscore_posi_binary = self.iscores(item_codes_posi_binary)
+        #uscore_nega_binary = self.uscores(user_codes_binary,
+        #                                  item_codes_nega_binary)
+        #iscore_nega_binary = self.iscores(item_codes_nega_binary)
+        score_posi = uscore_posi + iscore_posi
+        score_nega = uscore_nega + iscore_nega
+        #score_posi_binary = uscore_posi_binary + iscore_posi_binary
+        #score_nega_binary = uscore_nega_binary + iscore_nega_binary
+        output = self.ratio * (score_posi - score_nega)
+        output_binary = self.ratio * (score_posi - score_nega) #self.ratio * (score_posi_binary - score_nega_binary)
+        #print("score_posi:{}\nscore_nega:{}".format(score_posi, score_nega))
+        return (score_posi, score_nega)
+        #return (output.view(-1, 1).squeeze(1), output_binary)
+
+    def accuracy(self, output=None, target=None):
+        """Compute the current accuracy."""
+        correct = torch.gt(output.data, 0).sum()
+        res = correct / float(output.data.numel())
+        return res
