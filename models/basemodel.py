@@ -197,21 +197,21 @@ class UserEncoder(nn.Module):
         h = torch.mul(x, torch.autograd.Variable(self.scale))
         return self.active(h)
 
-class VSE(nn.Module):
-    """projecting img vector to text vector space"""
-    def __init__(self, dim):
-        super(VSE, self).__init__()
-        self.register_buffer('scale', torch.ones(1))
-        self.embedding = nn.Sequential(
-                        nn.Linear(dim, dim),
-                        nn.ReLU()
-        )
-    def set_scale(self, value):
-        """Set scale tanh."""
-        self.scale.fill_(value)
-    def forward(self, input):
-        x = self.embedding(input)
-        return x
+# class VSE(nn.Module):
+#     """projecting img vector to text vector space"""
+#     def __init__(self, dim):
+#         super(VSE, self).__init__()
+#         self.register_buffer('scale', torch.ones(1))
+#         self.embedding = nn.Sequential(
+#                         nn.Linear(dim, dim),
+#                         nn.ReLU()
+#         )
+#     def set_scale(self, value):
+#         """Set scale tanh."""
+#         self.scale.fill_(value)
+#     def forward(self, input):
+#         x = self.embedding(input)
+#         return x
 
 class PotMul(nn.Module):
     """Pointwise multiplication."""
@@ -261,7 +261,7 @@ class FashionBase(nn.Module):
         self.user_embdding = UserEncoder(num_users, dim)
         self.img_features = ItemImgFeature()
         self.text_features = ItemTextFeature()
-        self.embedding = VSE(dim)
+        #self.embedding = VSE(dim)
         self.single = single
         if single:
             self.img_encoder = ItemImgEncoder(dim)
@@ -441,7 +441,7 @@ class FashionBase(nn.Module):
         item_codes_img_nega = self.ilatent_img_codes(nega_img)
         item_codes_text_posi = self.ilatent_text_codes(posi_text)
         item_codes_text_nega = self.ilatent_text_codes(nega_text)
-        img_vse = self.img_embedding(item_codes_img_posi)
+        #img_vse = self.img_embedding(item_codes_img_posi)
         #item_codes_nega_binary = [h.detach().sign() for h in item_codes_nega]
         #item_codes_posi_binary = [h.detach().sign() for h in item_codes_posi]
         uscore_img_posi = self.uscores(user_codes, item_codes_img_posi)
@@ -465,7 +465,7 @@ class FashionBase(nn.Module):
         #score_nega_binary = uscore_nega_binary + iscore_nega_binary
         output = self.ratio * (score_posi - score_nega)
         output_binary = self.ratio * (score_posi - score_nega) #self.ratio * (score_posi_binary - score_nega_binary)
-        return (score_posi, score_nega, item_codes_text_posi, img_vse)
+        return (score_posi, score_nega, item_codes_text_posi, item_codes_img_posi)
         #return (output.view(-1, 1).squeeze(1), output_binary)
 
     def accuracy(self, output=None, target=None):
